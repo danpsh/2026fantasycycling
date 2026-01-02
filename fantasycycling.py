@@ -3,84 +3,95 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-# --- APP CONFIGURATION ---
+# --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="2026 Fantasy Cycling", layout="wide")
 st.title("🚴 2026 Fantasy Cycling Leaderboard")
-st.markdown("Testing 2025 results using live PCS data.")
+st.markdown("Automated leaderboard using live results from ProCyclingStats.")
 
-# --- LOAD DATA ---
-# Using exact names from your repository image
-try:
-    riders = pd.read_csv('riders.csv')
-    scoring = pd.read_csv('scoringrules.csv')
-    races = pd.read_csv('races2025.csv')
-except FileNotFoundError as e:
-    st.error(f"Error: Could not find one of your CSV files. Check names: {e}")
-    st.stop()
+# --- DATA LOADING WITH ENCODING FIX ---
+@st.cache_data
+def load_local_data():
+    # 'utf-8-sig' handles files saved by Excel that include a Byte Order Mark (BOM)
+    # 'latin1' is a fallback if your file uses standard Windows encoding
+    try:
+        riders_df = pd.read_csv('riders.csv', encoding='utf-8-sig')
+        scoring_df = pd.read_csv('scoringrules.csv', encoding='utf-8-sig')
+        races_df = pd.read_csv('races2025.csv', encoding='utf-8-sig')
+        return riders_df, scoring_df, races_df
+    except UnicodeDecodeError:
+        # If utf-8-sig fails, try latin1 for different character sets
+        riders_df = pd.read_csv('riders.csv', encoding='latin1')
+        scoring_df = pd.read_csv('scoringrules.csv', encoding='latin1')
+        races_df = pd.read_csv('races2025.csv', encoding='latin1')
+        return riders_df, scoring_df, races_df
 
-# --- THE SCRAPER ---
-@st.cache_data(ttl=3600) # Caches results for 1 hour so it's fast
-def get_pcs_stage_results(slug):
+riders, scoring, races = load_local_data()
+
+# --- THE PCS SCRAPER ENGINE ---
+def get_pcs_results(slug):
     url = f"https://www.procyclingstats.com/{slug}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
     try:
         response = requests.get(url, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # PCS stage results are usually in the first table with class 'results'
+        # PCS results are typically in a table with class 'results'
         table = soup.find('table', {'class': 'results'})
         
         results = []
         if table:
-            rows = table.find_all('tr')[1:11] # Get top 10 finishers
+            # We skip the header row and take the top 10 finishers
+            rows = table.find_all('tr')[1:11]
             for row in rows:
                 cols = row.find_all('td')
                 if len(cols) > 3:
                     rank = cols[0].text.strip()
-                    # Name is usually in the 4th column (index 3)
+                    # Name is usually in the 4th column; replace special space characters
                     name = cols[3].text.strip().replace('\xa0', ' ')
                     
                     if rank.isdigit():
                         results.append({'rider_name': name, 'rank': int(rank)})
         return pd.DataFrame(results)
     except Exception as e:
+        st.error(f"Error connecting to PCS for {slug}: {e}")
         return pd.DataFrame()
 
-# --- MAIN APP LOGIC ---
-if st.button('🔄 Refresh & Sync PCS Results'):
-    st.cache_data.clear() # Clears old data to get fresh results
-    st.info("Scraping live data from PCS... please wait.")
+# --- SIDEBAR & REFRESH ---
+if st.button('🔄 Sync Live Results from PCS'):
+    st.info("Fetching data... this may take a moment depending on the number of races.")
     
-    all_stage_data = []
+    all_results_list = []
     
-    # Loop through each race/stage in your races2025.csv
-    for _, row in races.iterrows():
-        df_res = get_pcs_stage_results(row['pcs_slug'])
-        if not df_res.empty:
-            df_res['race'] = row['race_name']
-            all_stage_data.append(df_res)
+    # Process each race/stage defined in your races2025.csv
+    for index, row in races.iterrows():
+        df_stage = get_pcs_results(row['pcs_slug'])
+        if not df_stage.empty:
+            df_stage['race_name'] = row['race_name']
+            all_results_list.append(df_stage)
     
-    if all_stage_data:
-        # 1. Combine all scraped results
-        final_results = pd.concat(all_stage_data)
+    if all_results_list:
+        # Combine all scraped results into one master table
+        master_results = pd.concat(all_results_list)
         
-        # 2. Attach points from your scoringrules.csv
-        merged_points = final_results.merge(scoring, on='rank')
+        # Merge results with your points system
+        results_with_points = master_results.merge(scoring, on='rank')
         
-        # 3. Match with your rider list to see who owns whom
-        leaderboard = merged_points.merge(riders, on='rider_name')
+        # Merge with your rider list to link riders to their fantasy owners/teams
+        # Ensure the column name 'rider_name' matches in your riders.csv
+        final_leaderboard = results_with_points.merge(riders, on='rider_name')
         
-        # --- DISPLAY RESULTS ---
-        st.header("🏆 Current Leaderboard")
-        # Group by rider and sum their points
-        summary = leaderboard.groupby(['rider_name', 'team'])['points'].sum().sort_values(ascending=False).reset_index()
-        st.table(summary)
+        # --- DISPLAY TABULAR DATA ---
+        st.header("🏆 Fantasy Standings")
         
-        with st.expander("View Full Point Breakdown"):
-            st.dataframe(leaderboard[['race', 'rider_name', 'rank', 'points']])
+        # Group by the rider name (and team if available) and sum points
+        standings = final_leaderboard.groupby(['rider_name', 'team'])['points'].sum().sort_values(ascending=False).reset_index()
+        st.table(standings)
+        
+        with st.expander("Detailed Points Breakdown"):
+            st.dataframe(final_leaderboard[['race_name', 'rider_name', 'rank', 'points']])
     else:
-        st.warning("No results found. Check your PCS slugs in races2025.csv.")
+        st.warning("No data found. Please check that your PCS slugs are correct.")
 
 else:
-    st.write("Click the button above to calculate the latest scores.")
+    st.write("Click the button above to start the live sync.")
