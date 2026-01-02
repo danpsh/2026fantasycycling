@@ -78,7 +78,6 @@ if st.button('🔄 Sync Live Results from PCS'):
         results_with_points = master_results.merge(scoring, on='rank')
         
         # Merge with your rider list to link riders to their fantasy owners/teams
-        # Ensure the column name 'rider_name' matches in your riders.csv
         final_leaderboard = results_with_points.merge(riders, on='rider_name')
         
         # --- DISPLAY TABULAR DATA ---
